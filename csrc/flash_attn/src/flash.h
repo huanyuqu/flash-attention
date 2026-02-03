@@ -135,6 +135,12 @@ struct Flash_fwd_params : public Qkv_params {
 
     int num_splits;  // For split-KV version
 
+    // Segmented Attention
+    int num_segments;
+    int * __restrict__ segment_lens;
+    void ** __restrict__ segment_k_ptrs;
+    void ** __restrict__ segment_v_ptrs;
+
     void * __restrict__ alibi_slopes_ptr;
     index_t alibi_slopes_batch_stride;
 

@@ -49,10 +49,45 @@ void set_params_fprop(Flash_fwd_params &params,
                       int window_size_right,
                       const float softcap,
                       bool seqlenq_ngroups_swapped=false,
-                      const bool unpadded_lse=false) {
+                      const bool unpadded_lse=false,
+                      // Segmented Attention
+                      const std::optional<at::Tensor> &segment_lens_ = std::nullopt,
+                      const std::optional<at::Tensor> &segment_k_ptrs_ = std::nullopt,
+                      const std::optional<at::Tensor> &segment_v_ptrs_ = std::nullopt) {
 
     // Reset the parameters
     params = {};
+
+    // Segmented Attention
+    if (segment_lens_.has_value()) {
+        auto segment_lens = segment_lens_.value();
+        CHECK_DEVICE(segment_lens);
+        CHECK_CONTIGUOUS(segment_lens);
+        TORCH_CHECK(segment_lens.dtype() == torch::kInt32, "segment_lens must have dtype int32");
+        params.num_segments = segment_lens.size(0);
+        params.segment_lens = static_cast<int *>(segment_lens.data_ptr());
+        
+        TORCH_CHECK(segment_k_ptrs_.has_value() && segment_v_ptrs_.has_value(), 
+                   "segment_k_ptrs and segment_v_ptrs must be provided if segment_lens is provided");
+                   
+        auto segment_k_ptrs = segment_k_ptrs_.value();
+        auto segment_v_ptrs = segment_v_ptrs_.value();
+        CHECK_DEVICE(segment_k_ptrs);
+        CHECK_DEVICE(segment_v_ptrs);
+        CHECK_CONTIGUOUS(segment_k_ptrs);
+        CHECK_CONTIGUOUS(segment_v_ptrs);
+        // Pointers are typically passed as int64 (long) in PyTorch for address
+        TORCH_CHECK(segment_k_ptrs.dtype() == torch::kInt64, "segment_k_ptrs must have dtype int64");
+        TORCH_CHECK(segment_v_ptrs.dtype() == torch::kInt64, "segment_v_ptrs must have dtype int64");
+        
+        params.segment_k_ptrs = reinterpret_cast<void **>(segment_k_ptrs.data_ptr());
+        params.segment_v_ptrs = reinterpret_cast<void **>(segment_v_ptrs.data_ptr());
+    } else {
+        params.num_segments = 0;
+        params.segment_lens = nullptr;
+        params.segment_k_ptrs = nullptr;
+        params.segment_v_ptrs = nullptr;
+    }
 
     params.is_bf16 = q.dtype() == torch::kBFloat16;
 
@@ -534,7 +569,11 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                const float softcap,
                const bool return_softmax,
                int num_splits,
-               std::optional<at::Generator> gen_) {
+               std::optional<at::Generator> gen_,
+               // Segmented Attention
+               std::optional<at::Tensor> &segment_lens_,
+               std::optional<at::Tensor> &segment_k_ptrs_,
+               std::optional<at::Tensor> &segment_v_ptrs_) {
 
     // Otherwise the kernel will be launched from cuda:0 device
     at::cuda::CUDAGuard device_guard{q.device()};
@@ -690,8 +729,18 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      window_size_right,
                      softcap,
                      seqlenq_ngroups_swapped,
-                     /*unpadded_lse*/true);
+                     /*unpadded_lse*/true,
+                     segment_lens_,
+                     segment_k_ptrs_,
+                     segment_v_ptrs_);
     params.total_q = total_q;
+
+    // Check constraints for Segmented Attention
+    if (segment_lens_.has_value()) {
+         TORCH_CHECK(p_dropout == 0.0f, "Segmented attention does not support dropout yet");
+         TORCH_CHECK(!alibi_slopes_.has_value(), "Segmented attention does not support ALiBi yet");
+         // Add more checks as necessary
+    }
 
     if (paged_KV) {
         params.block_table = block_table.data_ptr<int>();

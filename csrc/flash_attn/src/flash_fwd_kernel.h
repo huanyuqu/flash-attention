@@ -265,8 +265,69 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     }
 
     int n_block = n_block_max - 1;
+
+    // Segmented Attention Logic
+    int current_segment_idx = 0;
+    int current_seg_start_block = 0;
+    if (params.num_segments > 0) {
+        for (int i = 0; i < params.num_segments; ++i) {
+             int nb = (params.segment_lens[i] + kBlockN - 1) / kBlockN;
+             if (n_block < current_seg_start_block + nb) {
+                 current_segment_idx = i;
+                 break;
+             }
+             current_seg_start_block += nb;
+        }
+    }
+
+    auto load_segmented_block = [&](int target_block, auto& tKgK_dst, auto& tVgV_dst) {
+        if (params.num_segments > 0) {
+             while (target_block < current_seg_start_block && current_segment_idx > 0) {
+                 current_segment_idx--;
+                 int prev_nb = (params.segment_lens[current_segment_idx] + kBlockN - 1) / kBlockN;
+                 current_seg_start_block -= prev_nb;
+             }
+             
+             int rel_block = target_block - current_seg_start_block;
+             
+             if (current_segment_idx == params.num_segments - 1 && params.block_table != nullptr) {
+                  auto final_block_size = binfo.actual_seqlen_k - current_seg_start_block * kBlockN;
+                  std::optional<int> partial_size = std::nullopt;
+                  if (target_block == n_block_max - 1) {
+                      partial_size = binfo.actual_seqlen_k % kBlockN;
+                      if (partial_size == 0) partial_size = kBlockN;
+                  }
+                  
+                  tKgK_dst.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(
+                      tidx, rel_block, params.page_block_size, params.block_table, 
+                      params.k_batch_stride, params.k_row_stride, partial_size);
+                      
+                  tVgV_dst.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(
+                      tidx, rel_block, params.page_block_size, params.block_table, 
+                      params.v_batch_stride, params.v_row_stride, partial_size);
+             } else {
+                  Element* orig_ptr = tKgK_dst.data();
+                  Element* k_base_ptr = (Element*)params.k_ptr;
+                  long global_elem_idx = orig_ptr - k_base_ptr;
+                  long block_start_elem_idx = binfo.k_offset(params.k_batch_stride, params.k_row_stride, bidb) 
+                                            + (bidh / params.h_h_k_ratio) * params.k_head_stride 
+                                            + target_block * kBlockN * params.k_row_stride;
+                  long thread_elem_offset = global_elem_idx - block_start_elem_idx;
+                  
+                  Element* new_k_base = (Element*)((void**)params.segment_k_ptrs)[current_segment_idx];
+                  tKgK_dst.data() = new_k_base + rel_block * kBlockN * params.k_row_stride + thread_elem_offset;
+                  
+                  Element* new_v_base = (Element*)((void**)params.segment_v_ptrs)[current_segment_idx];
+                  tVgV_dst.data() = new_v_base + rel_block * kBlockN * params.v_row_stride + thread_elem_offset;
+             }
+        }
+    };
+
     // We don't need to clear the sK smem tiles since we'll mask out the scores anyway.
-    FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K>(gmem_tiled_copy_QKV, tKgK(_, _, _, n_block), tKsK, tKVcKV, tKVpKV,
+    Tensor tKgK_slice = tKgK(_, _, _, n_block);
+    Tensor tVgV_slice = tVgV(_, _, _, n_block); // Dummy slice for lambda
+    load_segmented_block(n_block, tKgK_slice, tVgV_slice);
+    FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K>(gmem_tiled_copy_QKV, tKgK_slice, tKsK, tKVcKV, tKVpKV,
                                        binfo.actual_seqlen_k - n_block * kBlockN);
     cute::cp_async_fence();
     // if (threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z < 2) { print(tKgK); }
@@ -307,11 +368,17 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
 
         // Advance gV
         if (masking_step > 0) {
-            FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tVgV(_, _, _, n_block), tVsV, tKVcKV, tKVpKV);
+            Tensor tKgK_slice = tKgK(_, _, _, n_block); // Dummy
+            Tensor tVgV_slice = tVgV(_, _, _, n_block);
+            load_segmented_block(n_block, tKgK_slice, tVgV_slice);
+            FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tVgV_slice, tVsV, tKVcKV, tKVpKV);
         } else {
             // Clear the smem tiles to account for predicated off loads
+            Tensor tKgK_slice = tKgK(_, _, _, n_block); // Dummy
+            Tensor tVgV_slice = tVgV(_, _, _, n_block);
+            load_segmented_block(n_block, tKgK_slice, tVgV_slice);
             FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
-                gmem_tiled_copy_QKV, tVgV(_, _, _, n_block), tVsV, tKVcKV, tKVpKV, binfo.actual_seqlen_k - n_block * kBlockN
+                gmem_tiled_copy_QKV, tVgV_slice, tVsV, tKVcKV, tKVpKV, binfo.actual_seqlen_k - n_block * kBlockN
             );
         }
         cute::cp_async_fence();
@@ -332,7 +399,10 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         FLASH_NAMESPACE::cp_async_wait<0>();
         __syncthreads();
         if (n_block > n_block_min) {
-            FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK(_, _, _, n_block - 1), tKsK, tKVcKV, tKVpKV);
+            Tensor tKgK_slice = tKgK(_, _, _, n_block - 1);
+            Tensor tVgV_slice = tVgV(_, _, _, n_block - 1); // Dummy
+            load_segmented_block(n_block - 1, tKgK_slice, tVgV_slice);
+            FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK_slice, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
             // isn't right and we get race conditions.
             cute::cp_async_fence();
@@ -380,7 +450,10 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         clear(acc_s);
         FLASH_NAMESPACE::cp_async_wait<0>();
         __syncthreads();
-        FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tVgV(_, _, _, n_block), tVsV, tKVcKV, tKVpKV);
+        Tensor tKgK_slice = tKgK(_, _, _, n_block); // Dummy
+        Tensor tVgV_slice = tVgV(_, _, _, n_block);
+        load_segmented_block(n_block, tKgK_slice, tVgV_slice);
+        FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tVgV_slice, tVsV, tKVcKV, tKVpKV);
         cute::cp_async_fence();
 
         FLASH_NAMESPACE::gemm</*A_in_regs=*/Kernel_traits::Is_Q_in_regs>(
@@ -394,7 +467,10 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         FLASH_NAMESPACE::cp_async_wait<0>();
         __syncthreads();
         if (n_block > n_block_min) {
-            FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK(_, _, _, n_block - 1), tKsK, tKVcKV, tKVpKV);
+            Tensor tKgK_slice = tKgK(_, _, _, n_block - 1);
+            Tensor tVgV_slice = tVgV(_, _, _, n_block - 1); // Dummy
+            load_segmented_block(n_block - 1, tKgK_slice, tVgV_slice);
+            FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK_slice, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
             // isn't right and we get race conditions.
             cute::cp_async_fence();

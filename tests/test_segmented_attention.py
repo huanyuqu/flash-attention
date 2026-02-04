@@ -1,7 +1,11 @@
 import torch
 import pytest
 import time
-from flash_attn import flash_attn_varlen_func
+try:
+    from vllm_flash_attn import flash_attn_varlen_func
+except ImportError:
+    from flash_attn import flash_attn_varlen_func
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_segmented_attention_performance():

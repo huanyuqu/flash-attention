@@ -631,8 +631,8 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     Tensor tVsV = make_tensor(tVsV_.data(), reshape_thread_tile(tVsV_.layout()));
 
     // Segmented Attention Logic
-    long thread_gK_offset = tKgK.data() - gK.data();
-    long thread_gV_offset = tVgV.data() - gV.data();
+    long thread_gK_offset = tKgK.data().get() - gK.data().get();
+    long thread_gV_offset = tVgV.data().get() - gV.data().get();
     long head_offset_k = (bidh / params.h_h_k_ratio) * params.k_head_stride;
     long head_offset_v = (bidh / params.h_h_k_ratio) * params.v_head_stride;
 
@@ -670,12 +670,12 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
                   if (update_k) {
                       tKgK_ref.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(
-                          tidx, rel_block, params.page_block_size, params.block_table, 
+                          tidx, rel_block, params.page_block_size, block_table, 
                           params.k_batch_stride, params.k_row_stride, partial_size);
                   }
                   if (update_v) {
                       tVgV_ref.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(
-                          tidx, rel_block, params.page_block_size, params.block_table, 
+                          tidx, rel_block, params.page_block_size, block_table, 
                           params.v_batch_stride, params.v_row_stride, partial_size);
                   }
              } else {
@@ -756,6 +756,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
     // Copy from Knew to K, optionally apply rotary embedding.
     if constexpr (Append_KV) {
+        int current_segment_idx_backup = current_segment_idx;
+        int current_seg_start_block_backup = current_seg_start_block;
+
         typename Kernel_traits::GmemTiledCopyRotcossinPaged gmem_tiled_copy_rotary;
         auto gmem_thr_copy_rotary = gmem_tiled_copy_rotary.get_thread_slice(tidx);
         typename Kernel_traits::GmemTiledCopyRotcossinContPaged gmem_tiled_copy_rotary_cont;
@@ -849,7 +852,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 }
             }
             tKgKnew.data() = tKgKnew.data() + (-int(kBlockN * params.knew_row_stride));
-            if (block_table == nullptr) {
+            if (params.num_segments > 0) {
+                if (n_block > n_block_copy_min) {
+                    load_segmented_kv(n_block - 1, tKgK, tVgV, true, true);
+                }
+            } else if (block_table == nullptr) {
                 tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
@@ -865,6 +872,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         __syncthreads();
         tKgK.data() = tKgK_data;
         tVgV.data() = tVgV_data;
+
+        if (params.num_segments > 0) {
+            current_segment_idx = current_segment_idx_backup;
+            current_seg_start_block = current_seg_start_block_backup;
+        }
     }
 
     // Read Q from gmem to smem, optionally apply rotary embedding.

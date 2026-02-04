@@ -116,8 +116,8 @@ def test_segmented_attention_performance():
             start_seg = time.time()
             
         # No copy needed! Direct pointers.
-        torch.ops.flash_attn.varlen_fwd(
-            q_unpad, 
+        torch.ops._vllm_fa2_C.varlen_fwd(
+            q_unpad,
             k_cache, v_cache,
             out_seg,
             cu_seqlens_q, cu_seqlens_k,

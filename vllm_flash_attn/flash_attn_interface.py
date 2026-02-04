@@ -152,6 +152,9 @@ def flash_attn_varlen_func(
     deterministic=False,
     return_attn_probs=False,
     block_table=None,
+    segment_lens=None,
+    segment_k_ptrs=None,
+    segment_v_ptrs=None,
     return_softmax_lse=False,
     out=None,
     # FA3 Only
@@ -273,6 +276,9 @@ def flash_attn_varlen_func(
             return_softmax_lse and dropout_p > 0,
             num_splits,
             None,
+            segment_lens,
+            segment_k_ptrs,
+            segment_v_ptrs,
         )
     elif fa_version == 3:
         assert alibi_slopes is None, "Alibi is not supported in FA3"

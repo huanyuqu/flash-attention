@@ -36,7 +36,10 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                const float softcap,
                const bool return_softmax,
                int num_splits,
-               std::optional<at::Generator> gen_);
+               std::optional<at::Generator> gen_,
+               std::optional<at::Tensor> &segment_lens_,
+               std::optional<at::Tensor> &segment_k_ptrs_,
+               std::optional<at::Tensor> &segment_v_ptrs_);
 
 std::vector<at::Tensor>
 mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_heads x head_size

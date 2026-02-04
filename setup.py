@@ -260,7 +260,7 @@ def get_package_version():
         return str(public_version)
 
 
-PYTORCH_VERSION = "2.4.0"
+PYTORCH_VERSION = "2.4.0" # This is now just a descriptive default
 MAIN_CUDA_VERSION = "12.1"
 
 
@@ -313,6 +313,6 @@ setup(
     ext_modules=ext_modules,
     cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
     python_requires=">=3.8",
-    install_requires=[f"torch == {PYTORCH_VERSION}"],
+    install_requires=["torch"],
     setup_requires=["psutil"],
 )

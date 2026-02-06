@@ -6,9 +6,8 @@ from vllm_flash_attn import flash_attn_varlen_func
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 @pytest.mark.parametrize("segment_lengths", [
-    [4096, 2048, 1024],
-    [2048, 2048, 2048],
-    [1024, 1024, 512],
+    [2048] * 9 + [16],
+    [16384, 16],
 ])
 @pytest.mark.parametrize("shuffle_blocks", [False, True])
 def test_segmented_attention_performance(segment_lengths, shuffle_blocks):
@@ -148,8 +147,8 @@ def test_segmented_attention_performance(segment_lengths, shuffle_blocks):
     # Segmented Args
     segment_lens_tensor = torch.tensor(segment_lengths, dtype=torch.int32, device=device)
     
-    iterations = 20
-    warmup = 2
+    iterations = 50
+    warmup = 5
     
     # =========================================================================
     # 1. Non-Paged Attention Kernel (Baseline)
@@ -268,5 +267,7 @@ def test_segmented_attention_performance(segment_lengths, shuffle_blocks):
     print(f"Segmented Attention Overhead: {(time_kernel_seg/time_kernel_non_paged - 1)*100:.1f}% vs Non-Paged")
     print(f"Paged Attention Overhead:     {(time_kernel_paged/time_kernel_non_paged - 1)*100:.1f}% vs Non-Paged")
     
+
 if __name__ == "__main__":
-    test_segmented_attention_performance([2048] * 9 + [512], True)
+    test_segmented_attention_performance([2048] * 9 + [16], True)
+    test_segmented_attention_performance([16384, 16], True)

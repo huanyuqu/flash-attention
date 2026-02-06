@@ -573,7 +573,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                // Segmented Attention
                std::optional<at::Tensor> &segment_lens_,
                std::optional<at::Tensor> &segment_k_ptrs_,
-               std::optional<at::Tensor> &segment_v_ptrs_) {
+               std::optional<at::Tensor> &segment_v_ptrs_,
+               bool force_split_kernel) {
 
     // Otherwise the kernel will be launched from cuda:0 device
     at::cuda::CUDAGuard device_guard{q.device()};
@@ -791,7 +792,9 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
 
     if (max_seqlen_k > 0) {
         auto stream = at::cuda::getCurrentCUDAStream().stream();
-        run_mha_fwd(params, stream, paged_KV);
+        // Segmented KV logic is currently implemented in the splitkv forward kernel.
+        // Force the splitkv path whenever segmented attention is requested.
+        run_mha_fwd(params, stream, paged_KV || params.num_segments > 0 || force_split_kernel);
     } else {
         // If seqlen_k == 0, then we have an empty tensor. We need to set the output to 0.
         out.zero_();

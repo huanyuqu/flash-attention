@@ -958,8 +958,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         __syncthreads();
 
         // Advance gV
+        bool is_paged = (params.num_segments > 0 && current_segment_idx == params.num_segments - 1 && params.block_table != nullptr);
         if (masking_step > 0) {
-            if (params.num_segments > 0) {
+            if (params.num_segments > 0 && !is_paged && n_block >= current_seg_start_block) {
+                tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
+            } else if (params.num_segments > 0) {
                 load_segmented_kv(n_block, tKgK, tVgV, false, true);
             } else if (block_table == nullptr) {
                 tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
@@ -997,7 +1000,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
         if (n_block > n_block_min) {
             // Advance gK
-            if (params.num_segments > 0) {
+            int orig_segment_idx = current_segment_idx;
+            int orig_seg_start_block = current_seg_start_block;
+            if (params.num_segments > 0 && !is_paged && (n_block - 1) >= current_seg_start_block) {
+                tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
+            } else if (params.num_segments > 0) {
                 load_segmented_kv(n_block - 1, tKgK, tVgV, true, false);
             } else if (block_table == nullptr) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
@@ -1005,6 +1012,8 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 tKgK.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                     block_table, params.k_batch_stride, params.k_row_stride);
             }
+            current_segment_idx = orig_segment_idx;
+            current_seg_start_block = orig_seg_start_block;
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
             // isn't right and we get race conditions.
@@ -1039,7 +1048,10 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         FLASH_NAMESPACE::cp_async_wait<0>();
         __syncthreads();
         // Advance gV
-        if (params.num_segments > 0) {
+        bool is_paged = (params.num_segments > 0 && current_segment_idx == params.num_segments - 1 && params.block_table != nullptr);
+        if (params.num_segments > 0 && !is_paged && n_block >= current_seg_start_block) {
+            tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
+        } else if (params.num_segments > 0) {
             load_segmented_kv(n_block, tKgK, tVgV, false, true);
         } else if (block_table == nullptr) {
             tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
@@ -1063,7 +1075,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         __syncthreads();
         if (n_block > n_block_min) {
             // Advance gK
-            if (params.num_segments > 0) {
+            int orig_segment_idx = current_segment_idx;
+            int orig_seg_start_block = current_seg_start_block;
+            if (params.num_segments > 0 && !is_paged && (n_block - 1) >= current_seg_start_block) {
+                tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
+            } else if (params.num_segments > 0) {
                 load_segmented_kv(n_block - 1, tKgK, tVgV, true, false);
             } else if (block_table == nullptr) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
@@ -1071,6 +1087,8 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 tKgK.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                     block_table, params.k_batch_stride, params.k_row_stride);            
             }
+            current_segment_idx = orig_segment_idx;
+            current_seg_start_block = orig_seg_start_block;
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
             // isn't right and we get race conditions.

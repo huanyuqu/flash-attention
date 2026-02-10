@@ -636,11 +636,23 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     long head_offset_k = (bidh / params.h_h_k_ratio) * params.k_head_stride;
     long head_offset_v = (bidh / params.h_h_k_ratio) * params.v_head_stride;
 
+    const int max_num_segments = params.max_num_segments;
+    const int num_segments = (max_num_segments > 0) ? params.num_segments[bidb] : 0;
+
     int current_segment_idx = 0;
     int current_seg_start_block = 0;
-    if (params.num_segments > 0) {
-        for (int i = 0; i < params.num_segments; ++i) {
-             int nb = (params.segment_lens[i] + kBlockN - 1) / kBlockN;
+    const int *segment_lens = nullptr;
+    const uint64_t *seg_k_ptrs_u64 = nullptr;
+    const uint64_t *seg_v_ptrs_u64 = nullptr;
+    if (num_segments > 0) {
+        // Segmented Attention layout:
+        // segment_lens / ptrs are flattened [B, max_num_segments] and params.num_segments[bidb]
+        // gives the valid segment count for this request.
+        segment_lens = params.segment_lens + bidb * max_num_segments;
+        seg_k_ptrs_u64 = reinterpret_cast<uint64_t const *>(params.segment_k_ptrs);
+        seg_v_ptrs_u64 = reinterpret_cast<uint64_t const *>(params.segment_v_ptrs);
+        for (int i = 0; i < num_segments; ++i) {
+             int nb = (segment_lens[i] + kBlockN - 1) / kBlockN;
              if (n_block_max - 1 < current_seg_start_block + nb) {
                  current_segment_idx = i;
                  break;
@@ -650,17 +662,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     }
 
     auto load_segmented_kv = [&](int target_block, auto& tKgK_ref, auto& tVgV_ref, bool update_k, bool update_v) {
-        if (params.num_segments > 0) {
+        if (num_segments > 0) {
              if (target_block < current_seg_start_block && current_segment_idx > 0) {
                  current_segment_idx--;
-                 int prev_nb = (params.segment_lens[current_segment_idx] + kBlockN - 1) / kBlockN;
+                 int prev_nb = (segment_lens[current_segment_idx] + kBlockN - 1) / kBlockN;
                  current_seg_start_block -= prev_nb;
              }
              
              int rel_block = target_block - current_seg_start_block;
              
-             if (current_segment_idx == params.num_segments - 1 && params.block_table != nullptr) {
-                  auto last_seg_len = params.segment_lens[current_segment_idx];
+               if (current_segment_idx == num_segments - 1 && params.block_table != nullptr) {
+                  auto last_seg_len = segment_lens[current_segment_idx];
                   int last_seg_n_blocks = (last_seg_len + kBlockN - 1) / kBlockN;
                   std::optional<int> partial_size = std::nullopt;
                   if (rel_block == last_seg_n_blocks - 1) {
@@ -679,18 +691,23 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                           params.v_batch_stride, params.v_row_stride, partial_size);
                   }
              } else {
-                 Element* new_k_base = (Element*)((void**)params.segment_k_ptrs)[current_segment_idx];
-                 if (update_k)
+                 // segment_{k,v}_ptrs is expected to be flattened [B, max_num_segments].
+                 // Indexing is (bidb * max_num_segments + segment_idx).
+                 const int seg_ptr_idx = bidb * max_num_segments + current_segment_idx;
+                 Element* new_k_base = reinterpret_cast<Element *>(seg_k_ptrs_u64[seg_ptr_idx]);
+                 if (update_k) {
                      tKgK_ref.data() = cute::make_gmem_ptr(new_k_base + head_offset_k + rel_block * kBlockN * params.k_row_stride + thread_gK_offset);
-                 
-                 Element* new_v_base = (Element*)((void**)params.segment_v_ptrs)[current_segment_idx];
-                 if (update_v)
+                 }
+
+                 Element* new_v_base = reinterpret_cast<Element *>(seg_v_ptrs_u64[seg_ptr_idx]);
+                 if (update_v) {
                      tVgV_ref.data() = cute::make_gmem_ptr(new_v_base + head_offset_v + rel_block * kBlockN * params.v_row_stride + thread_gV_offset);
+                 }
             }
         }
     };
 
-    if (params.num_segments > 0) {
+    if (num_segments > 0) {
         load_segmented_kv(n_block_max - 1, tKgK, tVgV, true, true);
     } else if (block_table != nullptr) {
         auto final_block_size = binfo.actual_seqlen_k - (n_block_max - 1) * kBlockN;
@@ -852,7 +869,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 }
             }
             tKgKnew.data() = tKgKnew.data() + (-int(kBlockN * params.knew_row_stride));
-            if (params.num_segments > 0) {
+            if (num_segments > 0) {
                 if (n_block > n_block_copy_min) {
                     load_segmented_kv(n_block - 1, tKgK, tVgV, true, true);
                 }
@@ -873,7 +890,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         tKgK.data() = tKgK_data;
         tVgV.data() = tVgV_data;
 
-        if (params.num_segments > 0) {
+        if (num_segments > 0) {
             current_segment_idx = current_segment_idx_backup;
             current_seg_start_block = current_seg_start_block_backup;
         }
@@ -958,11 +975,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         __syncthreads();
 
         // Advance gV
-        bool is_paged = (params.num_segments > 0 && current_segment_idx == params.num_segments - 1 && params.block_table != nullptr);
+        bool is_paged = (num_segments > 0 && current_segment_idx == num_segments - 1 && params.block_table != nullptr);
         if (masking_step > 0) {
-            if (params.num_segments > 0 && !is_paged && n_block >= current_seg_start_block) {
+            if (num_segments > 0 && !is_paged && n_block >= current_seg_start_block) {
                 tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
-            } else if (params.num_segments > 0) {
+            } else if (num_segments > 0) {
                 load_segmented_kv(n_block, tKgK, tVgV, false, true);
             } else if (block_table == nullptr) {
                 tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
@@ -1000,9 +1017,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
         if (n_block > n_block_min) {
             // Advance gK
-            if (params.num_segments > 0 && !is_paged && (n_block - 1) >= current_seg_start_block) {
+            if (num_segments > 0 && !is_paged && (n_block - 1) >= current_seg_start_block) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
-            } else if (params.num_segments > 0) {
+            } else if (num_segments > 0) {
                 int orig_segment_idx = current_segment_idx;
                 int orig_seg_start_block = current_seg_start_block;
                 load_segmented_kv(n_block - 1, tKgK, tVgV, true, false);
@@ -1048,10 +1065,10 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         FLASH_NAMESPACE::cp_async_wait<0>();
         __syncthreads();
         // Advance gV
-        bool is_paged = (params.num_segments > 0 && current_segment_idx == params.num_segments - 1 && params.block_table != nullptr);
-        if (params.num_segments > 0 && !is_paged && n_block >= current_seg_start_block) {
+        bool is_paged = (num_segments > 0 && current_segment_idx == num_segments - 1 && params.block_table != nullptr);
+        if (num_segments > 0 && !is_paged && n_block >= current_seg_start_block) {
             tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
-        } else if (params.num_segments > 0) {
+        } else if (num_segments > 0) {
             load_segmented_kv(n_block, tKgK, tVgV, false, true);
         } else if (block_table == nullptr) {
             tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
@@ -1075,9 +1092,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         __syncthreads();
         if (n_block > n_block_min) {
             // Advance gK
-            if (params.num_segments > 0 && !is_paged && (n_block - 1) >= current_seg_start_block) {
+            if (num_segments > 0 && !is_paged && (n_block - 1) >= current_seg_start_block) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
-            } else if (params.num_segments > 0) {
+            } else if (num_segments > 0) {
                 int orig_segment_idx = current_segment_idx;
                 int orig_seg_start_block = current_seg_start_block;
                 load_segmented_kv(n_block - 1, tKgK, tVgV, true, false);

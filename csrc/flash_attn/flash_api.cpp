@@ -51,6 +51,7 @@ void set_params_fprop(Flash_fwd_params &params,
                       bool seqlenq_ngroups_swapped=false,
                       const bool unpadded_lse=false,
                       // Segmented Attention
+                      const std::optional<at::Tensor> &segment_num_ = std::nullopt,
                       const std::optional<at::Tensor> &segment_lens_ = std::nullopt,
                       const std::optional<at::Tensor> &segment_k_ptrs_ = std::nullopt,
                       const std::optional<at::Tensor> &segment_v_ptrs_ = std::nullopt) {
@@ -64,26 +65,43 @@ void set_params_fprop(Flash_fwd_params &params,
         CHECK_DEVICE(segment_lens);
         CHECK_CONTIGUOUS(segment_lens);
         TORCH_CHECK(segment_lens.dtype() == torch::kInt32, "segment_lens must have dtype int32");
-        params.num_segments = segment_lens.size(0);
+        TORCH_CHECK(segment_lens.dim() == 2,
+                    "segment_lens must be 2D [B, max_num_segments]");
+        TORCH_CHECK(segment_lens.size(0) == static_cast<int64_t>(b),
+                    "segment_lens first dim must equal batch size b");
+        params.max_num_segments = segment_lens.size(1);
+
+        TORCH_CHECK(segment_num_.has_value(),
+                    "segment_num (per-request num_segments) must be provided when segment_lens is provided");
+        auto segment_num = segment_num_.value();
+        CHECK_DEVICE(segment_num);
+        CHECK_CONTIGUOUS(segment_num);
+        TORCH_CHECK(segment_num.dtype() == torch::kInt32, "segment_num must have dtype int32");
+        CHECK_SHAPE(segment_num, (int)b);
+        params.num_segments = static_cast<int *>(segment_num.data_ptr());
+
         params.segment_lens = static_cast<int *>(segment_lens.data_ptr());
-        
-        TORCH_CHECK(segment_k_ptrs_.has_value() && segment_v_ptrs_.has_value(), 
-                   "segment_k_ptrs and segment_v_ptrs must be provided if segment_lens is provided");
-                   
+
+        TORCH_CHECK(segment_k_ptrs_.has_value() && segment_v_ptrs_.has_value(),
+                    "segment_k_ptrs and segment_v_ptrs must be provided if segment_lens is provided");
+
         auto segment_k_ptrs = segment_k_ptrs_.value();
         auto segment_v_ptrs = segment_v_ptrs_.value();
         CHECK_DEVICE(segment_k_ptrs);
         CHECK_DEVICE(segment_v_ptrs);
         CHECK_CONTIGUOUS(segment_k_ptrs);
         CHECK_CONTIGUOUS(segment_v_ptrs);
-        // Pointers are typically passed as int64 (long) in PyTorch for address
         TORCH_CHECK(segment_k_ptrs.dtype() == torch::kInt64, "segment_k_ptrs must have dtype int64");
         TORCH_CHECK(segment_v_ptrs.dtype() == torch::kInt64, "segment_v_ptrs must have dtype int64");
-        
+
+        TORCH_CHECK(segment_k_ptrs.sizes() == segment_lens.sizes() && segment_v_ptrs.sizes() == segment_lens.sizes(),
+                    "segment_k_ptrs/segment_v_ptrs must have same shape as segment_lens");
+
         params.segment_k_ptrs = reinterpret_cast<void **>(segment_k_ptrs.data_ptr());
         params.segment_v_ptrs = reinterpret_cast<void **>(segment_v_ptrs.data_ptr());
     } else {
-        params.num_segments = 0;
+        params.max_num_segments = 0;
+        params.num_segments = nullptr;
         params.segment_lens = nullptr;
         params.segment_k_ptrs = nullptr;
         params.segment_v_ptrs = nullptr;
@@ -571,6 +589,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                int num_splits,
                std::optional<at::Generator> gen_,
                // Segmented Attention
+               std::optional<at::Tensor> &segment_num_,
                std::optional<at::Tensor> &segment_lens_,
                std::optional<at::Tensor> &segment_k_ptrs_,
                std::optional<at::Tensor> &segment_v_ptrs_,
@@ -731,6 +750,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      softcap,
                      seqlenq_ngroups_swapped,
                      /*unpadded_lse*/true,
+                     segment_num_,
                      segment_lens_,
                      segment_k_ptrs_,
                      segment_v_ptrs_);
@@ -794,7 +814,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         auto stream = at::cuda::getCurrentCUDAStream().stream();
         // Segmented KV logic is currently implemented in the splitkv forward kernel.
         // Force the splitkv path whenever segmented attention is requested.
-        run_mha_fwd(params, stream, paged_KV || params.num_segments > 0 || force_split_kernel);
+        run_mha_fwd(params, stream, paged_KV || params.max_num_segments > 0 || force_split_kernel);
     } else {
         // If seqlen_k == 0, then we have an empty tensor. We need to set the output to 0.
         out.zero_();

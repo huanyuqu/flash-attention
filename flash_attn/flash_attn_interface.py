@@ -165,29 +165,63 @@ def _flash_attn_varlen_forward(
     zero_tensors: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.varlen_fwd(
-        q,
-        k,
-        v,
-        None,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        seqused_k,
-        leftpad_k,
-        block_table,
-        alibi_slopes,
-        max_seqlen_q,
-        max_seqlen_k,
-        dropout_p,
-        softmax_scale,
-        zero_tensors,
-        causal,
-        window_size_left,
-        window_size_right,
-        softcap,
-        return_softmax,
-        None,
-    )
+
+    # HIP path uses the Triton AMD implementation with a different Python signature.
+    if torch.cuda.is_available() and torch.version.hip:
+        out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.varlen_fwd(
+            q,
+            k,
+            v,
+            None,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            seqused_k,
+            leftpad_k,
+            block_table,
+            alibi_slopes,
+            max_seqlen_q,
+            max_seqlen_k,
+            dropout_p,
+            softmax_scale,
+            zero_tensors,
+            causal,
+            window_size_left,
+            window_size_right,
+            softcap,
+            return_softmax,
+            None,
+        )
+    else:
+        # CUDA extension schema includes num_splits, generator, and optional segmented-attention args.
+        out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.varlen_fwd(
+            q,
+            k,
+            v,
+            None,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            seqused_k,
+            leftpad_k,
+            block_table,
+            alibi_slopes,
+            max_seqlen_q,
+            max_seqlen_k,
+            dropout_p,
+            softmax_scale,
+            zero_tensors,
+            causal,
+            window_size_left,
+            window_size_right,
+            softcap,
+            return_softmax,
+            1,     # num_splits
+            None,  # gen
+            None,  # segment_num
+            None,  # segment_lens
+            None,  # segment_k_ptrs
+            None,  # segment_v_ptrs
+            False, # force_split_kernel
+        )
     # if out.isnan().any() or softmax_lse.isnan().any():
     #     breakpoint()
     return out, softmax_lse, S_dmask, rng_state

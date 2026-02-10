@@ -37,6 +37,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                const bool return_softmax,
                int num_splits,
                std::optional<at::Generator> gen_,
+               std::optional<at::Tensor> &segment_num_,
                std::optional<at::Tensor> &segment_lens_,
                std::optional<at::Tensor> &segment_k_ptrs_,
                std::optional<at::Tensor> &segment_v_ptrs_,
@@ -114,7 +115,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
             "Tensor cu_seqlens_k, Tensor? seqused_k, Tensor? leftpad_k, Tensor? block_table, Tensor? alibi_slopes, "
             "int max_seqlen_q, int max_seqlen_k, float p_dropout, float softmax_scale, bool zero_tensors, "
             "bool is_causal, int window_size_left, int window_size_right, float softcap, bool return_softmax, "
-            "int num_splits, Generator? gen, Tensor? segment_lens, Tensor? segment_k_ptrs, Tensor? segment_v_ptrs, bool force_split_kernel=False) -> Tensor[]");
+            "int num_splits, Generator? gen, Tensor? segment_num, Tensor? segment_lens, Tensor? segment_k_ptrs, Tensor? segment_v_ptrs, bool force_split_kernel=False) -> Tensor[]");
     ops.impl("varlen_fwd", torch::kCUDA, make_pytorch_shim(&mha_varlen_fwd));
 
     ops.def("fwd_kvcache(Tensor! q, Tensor kcache, Tensor vcache, Tensor? k, Tensor? v, Tensor? seqlens_k, "

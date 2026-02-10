@@ -57,6 +57,7 @@ void set_params_fprop(Flash_fwd_params &params,
                       const float softcap,
                       bool seqlenq_ngroups_swapped=false,
                       const bool unpadded_lse=false,
+                      const std::optional<at::Tensor> &segment_num_ = std::nullopt,
                       const std::optional<at::Tensor> &segment_lens_ = std::nullopt,
                       const std::optional<at::Tensor> &segment_k_ptrs_ = std::nullopt,
                       const std::optional<at::Tensor> &segment_v_ptrs_ = std::nullopt);

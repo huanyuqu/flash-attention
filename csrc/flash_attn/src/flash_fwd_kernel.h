@@ -642,15 +642,20 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     int current_segment_idx = 0;
     int current_seg_start_block = 0;
     const int *segment_lens = nullptr;
+    const int64_t *segment_start_indices = nullptr;
     const uint64_t *seg_k_ptrs_u64 = nullptr;
     const uint64_t *seg_v_ptrs_u64 = nullptr;
     if (num_segments > 0) {
         // Segmented Attention layout:
-        // segment_lens / ptrs are flattened [B, max_num_segments] and params.num_segments[bidb]
+        // segment_lens / starts / ptrs are flattened [B, max_num_segments] and params.num_segments[bidb]
         // gives the valid segment count for this request.
         segment_lens = params.segment_lens + bidb * max_num_segments;
-        seg_k_ptrs_u64 = reinterpret_cast<uint64_t const *>(params.segment_k_ptrs);
-        seg_v_ptrs_u64 = reinterpret_cast<uint64_t const *>(params.segment_v_ptrs);
+        if (params.segment_start_indices != nullptr) {
+            segment_start_indices = params.segment_start_indices + bidb * max_num_segments;
+        } else {
+            seg_k_ptrs_u64 = reinterpret_cast<uint64_t const *>(params.segment_k_ptrs);
+            seg_v_ptrs_u64 = reinterpret_cast<uint64_t const *>(params.segment_v_ptrs);
+        }
         for (int i = 0; i < num_segments; ++i) {
              int nb = (segment_lens[i] + kBlockN - 1) / kBlockN;
              if (n_block_max - 1 < current_seg_start_block + nb) {
@@ -693,13 +698,19 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
              } else {
                  // segment_{k,v}_ptrs is expected to be flattened [B, max_num_segments].
                  // Indexing is (bidb * max_num_segments + segment_idx).
-                 const int seg_ptr_idx = bidb * max_num_segments + current_segment_idx;
-                 Element* new_k_base = reinterpret_cast<Element *>(seg_k_ptrs_u64[seg_ptr_idx]);
+                 const int64_t segment_start = segment_start_indices == nullptr
+                     ? 0
+                     : segment_start_indices[current_segment_idx];
+                 Element* new_k_base = segment_start_indices == nullptr
+                     ? reinterpret_cast<Element *>(seg_k_ptrs_u64[bidb * max_num_segments + current_segment_idx])
+                     : reinterpret_cast<Element *>(params.k_ptr) + segment_start * params.k_row_stride;
                  if (update_k) {
                      tKgK_ref.data() = cute::make_gmem_ptr(new_k_base + head_offset_k + rel_block * kBlockN * params.k_row_stride + thread_gK_offset);
                  }
 
-                 Element* new_v_base = reinterpret_cast<Element *>(seg_v_ptrs_u64[seg_ptr_idx]);
+                 Element* new_v_base = segment_start_indices == nullptr
+                     ? reinterpret_cast<Element *>(seg_v_ptrs_u64[bidb * max_num_segments + current_segment_idx])
+                     : reinterpret_cast<Element *>(params.v_ptr) + segment_start * params.v_row_stride;
                  if (update_v) {
                      tVgV_ref.data() = cute::make_gmem_ptr(new_v_base + head_offset_v + rel_block * kBlockN * params.v_row_stride + thread_gV_offset);
                  }

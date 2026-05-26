@@ -136,12 +136,13 @@ struct Flash_fwd_params : public Qkv_params {
     int num_splits;  // For split-KV version
 
     // Segmented Attention
-    // For multi-batch usage, segment_lens / segment_{k,v}_ptrs are expected to be 2D tensors flattened in memory
+    // For multi-batch usage, segment_lens / segment_start_indices / segment_{k,v}_ptrs are expected to be 2D tensors flattened in memory
     // with shape [B, max_num_segments], and num_segments points to a device int32 array of shape [B]
     // giving the valid segment count for each request.
     int max_num_segments;
     int * __restrict__ num_segments;
     int * __restrict__ segment_lens;
+    int64_t * __restrict__ segment_start_indices;
     void ** __restrict__ segment_k_ptrs;
     void ** __restrict__ segment_v_ptrs;
 

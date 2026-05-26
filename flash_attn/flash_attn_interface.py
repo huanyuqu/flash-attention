@@ -220,6 +220,7 @@ def _flash_attn_varlen_forward(
             None,  # segment_lens
             None,  # segment_k_ptrs
             None,  # segment_v_ptrs
+            None,  # segment_start_indices
             False, # force_split_kernel
         )
     # if out.isnan().any() or softmax_lse.isnan().any():

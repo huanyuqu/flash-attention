@@ -156,6 +156,7 @@ def flash_attn_varlen_func(
     segment_lens=None,
     segment_k_ptrs=None,
     segment_v_ptrs=None,
+    segment_start_indices=None,
     return_softmax_lse=False,
     out=None,
     # FA3 Only
@@ -282,6 +283,7 @@ def flash_attn_varlen_func(
             segment_lens,
             segment_k_ptrs,
             segment_v_ptrs,
+            segment_start_indices,
             force_split_kernel,
         )
     elif fa_version == 3:

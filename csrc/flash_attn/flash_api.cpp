@@ -54,7 +54,8 @@ void set_params_fprop(Flash_fwd_params &params,
                       const std::optional<at::Tensor> &segment_num_ = std::nullopt,
                       const std::optional<at::Tensor> &segment_lens_ = std::nullopt,
                       const std::optional<at::Tensor> &segment_k_ptrs_ = std::nullopt,
-                      const std::optional<at::Tensor> &segment_v_ptrs_ = std::nullopt) {
+                      const std::optional<at::Tensor> &segment_v_ptrs_ = std::nullopt,
+                      const std::optional<at::Tensor> &segment_start_indices_ = std::nullopt) {
 
     // Reset the parameters
     params = {};
@@ -82,27 +83,42 @@ void set_params_fprop(Flash_fwd_params &params,
 
         params.segment_lens = static_cast<int *>(segment_lens.data_ptr());
 
-        TORCH_CHECK(segment_k_ptrs_.has_value() && segment_v_ptrs_.has_value(),
-                    "segment_k_ptrs and segment_v_ptrs must be provided if segment_lens is provided");
+        if (segment_start_indices_.has_value()) {
+            auto segment_start_indices = segment_start_indices_.value();
+            CHECK_DEVICE(segment_start_indices);
+            CHECK_CONTIGUOUS(segment_start_indices);
+            TORCH_CHECK(segment_start_indices.dtype() == torch::kInt64,
+                        "segment_start_indices must have dtype int64");
+            TORCH_CHECK(segment_start_indices.sizes() == segment_lens.sizes(),
+                        "segment_start_indices must have same shape as segment_lens");
+            params.segment_start_indices = static_cast<int64_t *>(segment_start_indices.data_ptr());
+            params.segment_k_ptrs = nullptr;
+            params.segment_v_ptrs = nullptr;
+        } else {
+            TORCH_CHECK(segment_k_ptrs_.has_value() && segment_v_ptrs_.has_value(),
+                        "segment_start_indices or segment_k_ptrs/segment_v_ptrs must be provided if segment_lens is provided");
 
-        auto segment_k_ptrs = segment_k_ptrs_.value();
-        auto segment_v_ptrs = segment_v_ptrs_.value();
-        CHECK_DEVICE(segment_k_ptrs);
-        CHECK_DEVICE(segment_v_ptrs);
-        CHECK_CONTIGUOUS(segment_k_ptrs);
-        CHECK_CONTIGUOUS(segment_v_ptrs);
-        TORCH_CHECK(segment_k_ptrs.dtype() == torch::kInt64, "segment_k_ptrs must have dtype int64");
-        TORCH_CHECK(segment_v_ptrs.dtype() == torch::kInt64, "segment_v_ptrs must have dtype int64");
+            auto segment_k_ptrs = segment_k_ptrs_.value();
+            auto segment_v_ptrs = segment_v_ptrs_.value();
+            CHECK_DEVICE(segment_k_ptrs);
+            CHECK_DEVICE(segment_v_ptrs);
+            CHECK_CONTIGUOUS(segment_k_ptrs);
+            CHECK_CONTIGUOUS(segment_v_ptrs);
+            TORCH_CHECK(segment_k_ptrs.dtype() == torch::kInt64, "segment_k_ptrs must have dtype int64");
+            TORCH_CHECK(segment_v_ptrs.dtype() == torch::kInt64, "segment_v_ptrs must have dtype int64");
 
-        TORCH_CHECK(segment_k_ptrs.sizes() == segment_lens.sizes() && segment_v_ptrs.sizes() == segment_lens.sizes(),
-                    "segment_k_ptrs/segment_v_ptrs must have same shape as segment_lens");
+            TORCH_CHECK(segment_k_ptrs.sizes() == segment_lens.sizes() && segment_v_ptrs.sizes() == segment_lens.sizes(),
+                        "segment_k_ptrs/segment_v_ptrs must have same shape as segment_lens");
 
-        params.segment_k_ptrs = reinterpret_cast<void **>(segment_k_ptrs.data_ptr());
-        params.segment_v_ptrs = reinterpret_cast<void **>(segment_v_ptrs.data_ptr());
+            params.segment_start_indices = nullptr;
+            params.segment_k_ptrs = reinterpret_cast<void **>(segment_k_ptrs.data_ptr());
+            params.segment_v_ptrs = reinterpret_cast<void **>(segment_v_ptrs.data_ptr());
+        }
     } else {
         params.max_num_segments = 0;
         params.num_segments = nullptr;
         params.segment_lens = nullptr;
+        params.segment_start_indices = nullptr;
         params.segment_k_ptrs = nullptr;
         params.segment_v_ptrs = nullptr;
     }
@@ -593,6 +609,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                std::optional<at::Tensor> &segment_lens_,
                std::optional<at::Tensor> &segment_k_ptrs_,
                std::optional<at::Tensor> &segment_v_ptrs_,
+               std::optional<at::Tensor> &segment_start_indices_,
                bool force_split_kernel) {
 
     // Otherwise the kernel will be launched from cuda:0 device
@@ -753,7 +770,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      segment_num_,
                      segment_lens_,
                      segment_k_ptrs_,
-                     segment_v_ptrs_);
+                     segment_v_ptrs_,
+                     segment_start_indices_);
     params.total_q = total_q;
 
     // Check constraints for Segmented Attention
